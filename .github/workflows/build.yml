@@ -1,0 +1,72 @@
+name: build
+
+# Two jobs, in the order that gives the most useful failure message first: run
+# the tests against every service, then build the container images. A failing
+# test should not be discovered halfway through a docker build.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false      # one broken service should not hide the others
+      matrix:
+        service:
+          - ingestion-service
+          - intersection-service
+          - congestion-service
+          - routing-service
+          - watchdog-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: temurin
+          cache: maven
+
+      # Each service is an independent Maven project with no parent aggregator,
+      # so Maven runs inside the service directory rather than at the root.
+      - name: mvn test
+        working-directory: ${{ matrix.service }}
+        run: mvn -B test
+
+  images:
+    name: image ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: ingestion-service,    port: 7020 }
+          - { service: intersection-service, port: 7021 }
+          - { service: congestion-service,   port: 7022 }
+          - { service: routing-service,      port: 7023 }
+          - { service: watchdog-service,     port: 7024 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built, not pushed. Nothing here has AWS credentials, and a public repo
+      # is the wrong place to put them. Pushing is the deploy script's job, run
+      # by a person who already has credentials.
+      - name: docker build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: aws/docker/Dockerfile
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            PORT=${{ matrix.port }}
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

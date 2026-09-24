@@ -1,0 +1,670 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  TrafficFlow, stack 2 of 2: network, message broker, and the five services on
+  ECS Fargate.
+
+  Deploy 01-ecr.yaml and push the images before this stack, otherwise the ECS
+  services will start and immediately fail to pull.
+
+# ---------------------------------------------------------------------------
+#  What this template is doing, in one paragraph.
+#
+#  The five services keep talking to each other exactly as they do on a laptop:
+#  over REST at an address they read from an environment variable, and over
+#  OpenWire to a broker at BROKER_URL. Nothing in the Java changes. What changes
+#  is who supplies those addresses. Locally it is docker-compose and its network
+#  aliases; here it is Cloud Map, which gives each ECS service a private DNS
+#  name inside the VPC, and Amazon MQ, which is a managed ActiveMQ broker
+#  instead of a container. Only routing, ingestion, congestion and the watchdog
+#  are published through the load balancer. The intersection service stays
+#  private, because it is the internal source of truth and nothing outside the
+#  system has a reason to call it directly.
+# ---------------------------------------------------------------------------
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: trafficflow
+    Description: Prefix for resource names and the Cloud Map namespace.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: >
+      Tag to deploy. The deploy script pushes the short git sha as well as
+      latest, so a specific commit can be rolled back to by name.
+
+  MqUsername:
+    Type: String
+    Default: trafficflow
+    Description: Amazon MQ broker user.
+
+  MqPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: >
+      Amazon MQ broker password. At least 12 characters, no commas. Passed in at
+      deploy time and never committed. In a system that mattered this would come
+      from Secrets Manager and be injected with the container secrets field
+      rather than as a parameter.
+
+  MqEngineVersion:
+    Type: String
+    Default: "5.18.4"
+    Description: >
+      Amazon MQ runs ActiveMQ Classic 5.x. The local broker in
+      docker-compose.yml is 6.1.4, which is a deliberate difference worth
+      knowing about: the 6.x client speaks OpenWire to a 5.18 broker, so the
+      services connect unchanged, but the broker versions are not identical.
+      Run "aws mq describe-broker-engine-types" to confirm what is current.
+
+  TaskCpu:
+    Type: String
+    Default: "256"
+    AllowedValues: ["256", "512", "1024"]
+
+  TaskMemory:
+    Type: String
+    Default: "512"
+    AllowedValues: ["512", "1024", "2048"]
+
+Resources:
+
+  # ------------------------------------------------------------------ network
+  #
+  # Two public subnets in different availability zones. Public, with no NAT
+  # gateway, is a cost decision made on purpose: a NAT gateway is billed hourly
+  # plus per GB and would be the single most expensive line on this stack, for
+  # the sole benefit of keeping tasks in private subnets. The tasks are instead
+  # protected by security groups that allow inbound traffic only from the load
+  # balancer and from each other. For a student deployment that is the right
+  # trade. For anything holding real data it is not, and the fix is private
+  # subnets behind a NAT gateway or VPC endpoints.
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true      # required for Cloud Map names to resolve
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  SubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  # ----------------------------------------------------------- security groups
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public entry point on port 80
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from anywhere
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TrafficFlow service tasks
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 7020
+          ToPort: 7024
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: Load balancer to the published services
+
+  # Service to service traffic, added separately because a security group
+  # cannot reference itself in its own creation.
+  ServiceToServiceIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ServiceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 7020
+      ToPort: 7024
+      SourceSecurityGroupId: !Ref ServiceSecurityGroup
+      Description: Routing to intersection and congestion, intersection to ingestion
+
+  MqSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Amazon MQ, reachable only from the service tasks
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 61617
+          ToPort: 61617
+          SourceSecurityGroupId: !Ref ServiceSecurityGroup
+          Description: OpenWire over TLS
+
+  # ------------------------------------------------------------------- broker
+  #
+  # Amazon MQ rather than a container running ActiveMQ. The broker is the one
+  # piece of this system whose failure takes down the messaging for everything
+  # else, and patching and restarting it is not work worth owning here.
+  #
+  # SINGLE_INSTANCE is the cheap option and it has a real consequence: broker
+  # maintenance means a short outage. The system already tolerates that. The
+  # congestion service reports "published": false rather than pretending, and
+  # routing keeps using the last level it was told. ACTIVE_STANDBY_MULTI_AZ is
+  # the production answer and roughly doubles the cost.
+
+  Broker:
+    Type: AWS::AmazonMQ::Broker
+    Properties:
+      BrokerName: !Sub "${ProjectName}-broker"
+      EngineType: ACTIVEMQ
+      EngineVersion: !Ref MqEngineVersion
+      HostInstanceType: mq.t3.micro
+      DeploymentMode: SINGLE_INSTANCE
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
+      SubnetIds:
+        - !Ref SubnetA
+      SecurityGroups:
+        - !Ref MqSecurityGroup
+      Logs:
+        General: true
+      Users:
+        - Username: !Ref MqUsername
+          Password: !Ref MqPassword
+          ConsoleAccess: true
+
+  # --------------------------------------------------------- service discovery
+  #
+  # This is the piece that replaces docker-compose network aliases. Each ECS
+  # service registers itself, and its task addresses appear under
+  # <name>.trafficflow.local. When a task is replaced the record follows it,
+  # which is why the services can be given a DNS name in an environment variable
+  # and never need to learn an IP address.
+
+  Namespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Sub "${ProjectName}.local"
+      Vpc: !Ref Vpc
+
+  IngestionDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: ingestion
+      NamespaceId: !Ref Namespace
+      DnsConfig:
+        DnsRecords: [{ Type: A, TTL: 15 }]
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  IntersectionDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: intersection
+      NamespaceId: !Ref Namespace
+      DnsConfig:
+        DnsRecords: [{ Type: A, TTL: 15 }]
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  CongestionDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: congestion
+      NamespaceId: !Ref Namespace
+      DnsConfig:
+        DnsRecords: [{ Type: A, TTL: 15 }]
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # --------------------------------------------------------------- ecs cluster
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ProjectName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled   # costs money; enable when there is something to investigate
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}"
+      RetentionInDays: 7   # a student deployment does not need 30 days of logs
+
+  # Pulls images and writes logs. This is the role ECS itself uses, which is not
+  # the same thing as a task role: the services make no AWS API calls of their
+  # own, so they have no task role at all.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # --------------------------------------------------------- task definitions
+
+  IngestionTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-ingestion"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: ingestion
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/ingestion-service:${ImageTag}"
+          PortMappings: [{ ContainerPort: 7020 }]
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ingestion
+
+  IntersectionTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-intersection"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: intersection
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/intersection-service:${ImageTag}"
+          PortMappings: [{ ContainerPort: 7021 }]
+          Essential: true
+          Environment:
+            - Name: INGESTION_URL
+              Value: !Sub "http://ingestion.${ProjectName}.local:7020"
+            - Name: BROKER_URL
+              Value: !Select [0, !GetAtt Broker.OpenWireEndpoints]
+            - Name: BROKER_USER
+              Value: !Ref MqUsername
+            - Name: BROKER_PASSWORD
+              Value: !Ref MqPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: intersection
+
+  CongestionTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-congestion"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: congestion
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/congestion-service:${ImageTag}"
+          PortMappings: [{ ContainerPort: 7022 }]
+          Essential: true
+          Environment:
+            - Name: BROKER_URL
+              Value: !Select [0, !GetAtt Broker.OpenWireEndpoints]
+            - Name: BROKER_USER
+              Value: !Ref MqUsername
+            - Name: BROKER_PASSWORD
+              Value: !Ref MqPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: congestion
+
+  RoutingTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-routing"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: routing
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/routing-service:${ImageTag}"
+          PortMappings: [{ ContainerPort: 7023 }]
+          Essential: true
+          Environment:
+            - Name: INTERSECTION_URL
+              Value: !Sub "http://intersection.${ProjectName}.local:7021"
+            - Name: CONGESTION_URL
+              Value: !Sub "http://congestion.${ProjectName}.local:7022"
+            - Name: BROKER_URL
+              Value: !Select [0, !GetAtt Broker.OpenWireEndpoints]
+            - Name: BROKER_USER
+              Value: !Ref MqUsername
+            - Name: BROKER_PASSWORD
+              Value: !Ref MqPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: routing
+
+  WatchdogTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-watchdog"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: watchdog
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/watchdog-service:${ImageTag}"
+          PortMappings: [{ ContainerPort: 7024 }]
+          Essential: true
+          Environment:
+            - Name: BROKER_URL
+              Value: !Select [0, !GetAtt Broker.OpenWireEndpoints]
+            - Name: BROKER_USER
+              Value: !Ref MqUsername
+            - Name: BROKER_PASSWORD
+              Value: !Ref MqPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: watchdog
+
+  # --------------------------------------------------------------- entry point
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  RoutingTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Port: 7023
+      Protocol: HTTP
+      TargetType: ip           # required for Fargate, which has no instances
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+
+  IngestionTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Port: 7020
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /health
+      Matcher: { HttpCode: "200" }
+
+  CongestionTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Port: 7022
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /health
+      Matcher: { HttpCode: "200" }
+
+  WatchdogTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Port: 7024
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /health
+      Matcher: { HttpCode: "200" }
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref RoutingTargetGroup
+
+  IngestionRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ["/cleaning-report", "/districts"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref IngestionTargetGroup
+
+  CongestionRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ["/congestion", "/congestion/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref CongestionTargetGroup
+
+  WatchdogRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          # Four of the five services define /status, and a single ALB cannot
+          # publish all of them on one path. The watchdog wins it because its
+          # status is the one an operator needs. See the "Known limitations"
+          # section of aws/README.md for the two proper fixes.
+          Values: ["/status", "/alerts"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref WatchdogTargetGroup
+
+  # -------------------------------------------------------------- ecs services
+  #
+  # DesiredCount is 1 everywhere, and that is a documented limitation rather
+  # than a default nobody thought about. Every service holds its state in
+  # memory, so a second congestion task would have its own congestion level and
+  # the two would disagree. Scaling routing out is the safe one, and even that
+  # needs each instance to receive the congestion topic on its own subscription.
+
+  IngestionService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: ingestion
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref IngestionTask
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED   # needed to pull from ECR without a NAT gateway
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt IngestionDiscovery.Arn
+      LoadBalancers:
+        - ContainerName: ingestion
+          ContainerPort: 7020
+          TargetGroupArn: !Ref IngestionTargetGroup
+
+  IntersectionService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: intersection
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref IntersectionTask
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt IntersectionDiscovery.Arn
+      # No load balancer entry on purpose. This service is internal.
+
+  CongestionService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: congestion
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref CongestionTask
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt CongestionDiscovery.Arn
+      LoadBalancers:
+        - ContainerName: congestion
+          ContainerPort: 7022
+          TargetGroupArn: !Ref CongestionTargetGroup
+
+  RoutingService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: routing
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref RoutingTask
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+      LoadBalancers:
+        - ContainerName: routing
+          ContainerPort: 7023
+          TargetGroupArn: !Ref RoutingTargetGroup
+
+  WatchdogService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: watchdog
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref WatchdogTask
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+      LoadBalancers:
+        - ContainerName: watchdog
+          ContainerPort: 7024
+          TargetGroupArn: !Ref WatchdogTargetGroup
+
+Outputs:
+  BaseUrl:
+    Description: Public entry point. /route, /cleaning-report, /congestion and /status are published here.
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+
+  RouteExample:
+    Description: The same call the local demo makes, against the deployed system.
+    Value: !Sub "http://${LoadBalancer.DNSName}/route?from=INT-1001&to=INT-1002"
+
+  BrokerOpenWireEndpoint:
+    Description: What the services are given as BROKER_URL.
+    Value: !Select [0, !GetAtt Broker.OpenWireEndpoints]
+
+  BrokerConsole:
+    Description: ActiveMQ web console, for watching the topic and the queue.
+    Value: !Select [0, !GetAtt Broker.ConsoleURLs]

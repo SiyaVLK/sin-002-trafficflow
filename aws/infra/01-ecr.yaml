@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  TrafficFlow, stack 1 of 2: container registries.
+
+  Separate from the application stack because of ordering. ECS cannot start a
+  task whose image does not exist yet, so the repositories have to be created
+  and filled before 02-app.yaml is deployed. Keeping them in their own stack
+  also means the application stack can be torn down and rebuilt without
+  re-pushing every image.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: trafficflow
+    Description: Prefix for repository names.
+
+Resources:
+  IngestionRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}/ingestion-service"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        # Untagged layers accumulate on every push and are billed per GB.
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Expire untagged images after 7 days",
+              "selection": {
+                "tagStatus": "untagged",
+                "countType": "sinceImagePushed",
+                "countUnit": "days",
+                "countNumber": 7
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  IntersectionRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}/intersection-service"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  CongestionRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}/congestion-service"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  RoutingRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}/routing-service"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  WatchdogRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}/watchdog-service"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+Outputs:
+  RegistryUri:
+    Description: The account registry the deploy script pushes to.
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"
+    Export:
+      Name: !Sub "${ProjectName}-registry-uri"

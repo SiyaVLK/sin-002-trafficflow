@@ -116,6 +116,14 @@ validate. Start it again: RECOVERED.
 Java 21 · Maven (five independent projects) · Javalin · Jackson · ActiveMQ
 Classic 6 (Jakarta JMS) · JUnit 5
 
+## Deploying to AWS
+
+The system was built to run on a laptop. [aws/README.md](aws/README.md) is the
+work of describing the same five services as infrastructure: container images on
+ECS Fargate, Cloud Map for service discovery, and Amazon MQ in place of the local
+broker. The application code does not change, because every address a service
+needs already arrives as an environment variable.
+
 ## Development notes
 
 The initial scaffold was generated with AI assistance. All code was reviewed,

@@ -1,0 +1,10 @@
+.git
+.gitignore
+**/target
+**/*.iml
+.idea
+.vscode
+scripts
+aws/docs
+*.md
+!aws/**/*.md

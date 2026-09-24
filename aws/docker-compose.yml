@@ -1,0 +1,113 @@
+# The whole system on one machine: five services and a broker.
+#
+#   docker compose -f aws/docker-compose.yml up --build
+#
+# This is the local rehearsal for the AWS deployment in infra/. The shape is
+# deliberately the same: every address a service needs arrives as an environment
+# variable, and nothing is hardcoded to localhost. Compose resolves the service
+# names on its own network; on AWS the same variables point at Cloud Map DNS
+# names and an Amazon MQ endpoint instead. The application code does not change.
+#
+# common/docker-compose.yml is still the broker-only file used during
+# development, when the services run from jars on the host.
+
+name: trafficflow
+
+services:
+  broker:
+    image: apache/activemq-classic:6.1.4
+    container_name: trafficflow-broker
+    ports:
+      - "61616:61616"   # OpenWire, what the services connect to
+      - "8161:8161"     # web console (admin/admin), useful for watching the topic
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 61616 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  ingestion:
+    build:
+      context: ..
+      dockerfile: aws/docker/Dockerfile
+      args:
+        SERVICE: ingestion-service
+        PORT: "7020"
+    ports:
+      - "7020:7020"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7020/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  intersection:
+    build:
+      context: ..
+      dockerfile: aws/docker/Dockerfile
+      args:
+        SERVICE: intersection-service
+        PORT: "7021"
+    environment:
+      INGESTION_URL: http://ingestion:7020
+      BROKER_URL: tcp://broker:61616
+    ports:
+      - "7021:7021"
+    depends_on:
+      ingestion:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+
+  congestion:
+    build:
+      context: ..
+      dockerfile: aws/docker/Dockerfile
+      args:
+        SERVICE: congestion-service
+        PORT: "7022"
+    environment:
+      BROKER_URL: tcp://broker:61616
+    ports:
+      - "7022:7022"
+    depends_on:
+      broker:
+        condition: service_healthy
+
+  routing:
+    build:
+      context: ..
+      dockerfile: aws/docker/Dockerfile
+      args:
+        SERVICE: routing-service
+        PORT: "7023"
+    environment:
+      INTERSECTION_URL: http://intersection:7021
+      CONGESTION_URL: http://congestion:7022
+      BROKER_URL: tcp://broker:61616
+    ports:
+      - "7023:7023"
+    depends_on:
+      - intersection
+      - congestion
+
+  watchdog:
+    build:
+      context: ..
+      dockerfile: aws/docker/Dockerfile
+      args:
+        SERVICE: watchdog-service
+        PORT: "7024"
+    environment:
+      BROKER_URL: tcp://broker:61616
+    ports:
+      - "7024:7024"
+    depends_on:
+      broker:
+        condition: service_healthy
+
+# No named volumes. The broker runs non-persistent and every service keeps its
+# state in memory, which is the documented limitation of the system rather than
+# an oversight of this file.
