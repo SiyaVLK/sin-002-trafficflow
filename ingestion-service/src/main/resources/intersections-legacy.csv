@@ -1,0 +1,45 @@
+intersection_id,description,region,latitude,longitude
+# Legacy export from the traffic signal asset register.
+# Replace this file with the brief's intersections-legacy.csv - the parser
+# maps columns by header name, so the common aliases are handled as they are.
+INT-001,Empire Rd & Jan Smuts Ave,Parktown,-26.1830,28.0300
+INT-002,  jan smuts ave & bolton rd ,Rosebank,-26.1470,28.0400
+INT-003,Oxford Rd & Jellicoe Ave,Rosebank,-26.1440,28.0430
+INT-004,WILLIAM NICOL DR & REPUBLIC RD,Randburg,-26.1010,28.0000
+INT-005,Ontdekkers Rd & Hendrik Potgieter Rd,Roodepoort,-26.1400,27.8600
+INT-006,Beyers Naude Dr & Weltevreden Rd,Roodepoort,-26.0930,27.9350
+INT-007,Chris Hani Rd & Immink Dr,Soweto,-26.2370,27.8580
+INT-008,Klipspruit Valley Rd & Old Potch Rd,Soweto,-26.2610,27.8790
+INT-009,Rivonia Rd & Katherine St,Sandton,-26.1060,28.0580
+INT-010,Grayston Dr & Sandton Dr,Sandton,-26.1030,28.0620
+INT-011,Katherine St & Wierda Rd,Sandton,-26.1080,28.0640
+INT-012,Louis Botha Ave & Corlett Dr,Alexandra,-26.1340,28.0900
+INT-013,London Rd & Far East Bank,Alexandra,-26.1000,28.1070
+INT-014,Commissioner St & Eloff St,Johannesburg CBD,-26.2050,28.0430
+INT-015,Jan Smuts Ave & Empire Rd*,Parktown,-26.1830,28.0300
+INT-016,Rissik St & Pritchard St,Johannesburg CBD,-26.2040,28.0410
+INT-017,Main Reef Rd & Nasrec Rd,Nasrec,-26.2470,27.9790
+INT-018,Xavier St & Columbine Ave,Mondeor,-26.2680,27.9930
+INT-019,Golden Hwy & Lawley Rd,Lawley,-26.3650,27.8210
+INT-020,Old Vereeniging Rd & Eikenhof,Eikenhof,-26.3380,27.9490
+INT-021,Witkoppen Rd & Cedar Rd (north),Fourways,-26.0180,28.0080
+INT-022,Malibongwe Dr & Northumberland Ave,Northriding,-26.0420,27.9720
+INT-023,Beyers Naude Dr & Cr Swart Dr,Northcliff,-26.1260,27.9540
+INT-024,Kingfisher Dr & Peter Place,Bryanston,-26.0620,28.0120
+INT-025,Pretoria Main Rd & New Rd,Midrand,-25.9990,28.1260
+INT-026,Olifantsfontein Rd & K101,Midrand,-25.9770,28.1750
+INT-027,Allandale Rd & Le Roux Ave,Halfway House,-25.9860,28.1310
+INT-028,Bram Fischer Dr & Republic Rd,Randburg,-26.0960,27.9980
+INT-029,Hans Strijdom Dr & Kingfisher Dr,Randburg,-26.0900,28.0040
+INT-030,Barry Hertzog Ave & Judith Rd,Emmarentia,-26.1590,28.0130
+
+INT-002,Jan Smuts Ave & Bolton Rd,Rosebank,-26.1470,28.0400
+INT-009,Rivonia Rd & Katherine St,Sandton,-26.1060,28.0580
+INT-004,William Nicol Dr & Republic Rd,Sandton,-26.1010,28.0000
+INT-031,Fox St & Sauer St,N/A,-26.2060,28.0380
+,Kerk St & Von Wielligh St,Johannesburg CBD,-26.2030,28.0460
+INT-032,,Melville,-26.1750,28.0090
+INT-033,Beyers Naude Dr & Rustenburg Rd,Blackheath,not-a-number,28.9100
+INT-034,Sloane St & Main Rd,Bryanston,-99.5000,28.0200
+INT-035,Zone 6 & Main Rd,Diepkloof,N/A,NULL
+INT-036,Corlett Dr & Athol Oaklands,Melrose,-26.1330
