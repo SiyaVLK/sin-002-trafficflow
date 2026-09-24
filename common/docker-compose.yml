@@ -1,0 +1,22 @@
+# ActiveMQ broker for TrafficFlow.
+#
+#   docker compose up -d      start
+#   docker compose down       stop
+#
+# 61616 is the JMS port the services connect to.
+# 8161  is the web console (admin/admin) - useful for watching the topic and
+#       queue during the demo.
+#
+# If Docker is unavailable, see README.md in this folder for how to run the
+# same broker from the ActiveMQ zip instead. The services do not know or care
+# which one they are talking to.
+services:
+  broker:
+    image: apache/activemq-classic:6.1.4
+    container_name: trafficflow-broker
+    ports:
+      - "61616:61616"
+      - "8161:8161"
+    environment:
+      ACTIVEMQ_CONNECTION_USER: ""
+      ACTIVEMQ_CONNECTION_PASSWORD: ""

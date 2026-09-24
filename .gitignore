@@ -1,0 +1,9 @@
+target/
+*.log
+logs/
+activemq-data/
+
+.idea/
+*.iml
+.vscode/
+.DS_Store
