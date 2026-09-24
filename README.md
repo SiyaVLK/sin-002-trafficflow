@@ -121,3 +121,11 @@ Classic 6 (Jakarta JMS) · JUnit 5
 The initial scaffold was generated with AI assistance. All code was reviewed,
 run, tested and debugged by me, and I can walk through any part of it —
 including why the congestion level is a topic and the heartbeat is a queue.
+
+## Running the broker without Docker
+
+`common/docker-compose.yml` is the brief's route. Docker Desktop cannot be
+installed on this machine (IT policy disables Virtual Machine Platform), so
+`broker/` runs the same ActiveMQ as a plain jar:
+Still a separate process on port 61616 - only the packaging differs, and it can
+be killed independently to demonstrate how the services cope.
