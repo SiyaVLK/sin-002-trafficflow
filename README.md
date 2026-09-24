@@ -17,7 +17,7 @@ Built for the WeThinkCode_ **Systems Integration** elective, September 2026.
 | ingestion-service | 7020 | Cleans `intersections-legacy.csv` and serves the result |
 | intersection-service | 7021 | Source of truth for intersection and district validation |
 | congestion-service | 7022 | City-wide congestion level on the 0–8 scale |
-| routing-service | 7023 | Travel-time estimates from intersections and congestion |
+| routing-service | 7023 | Travel-time estimates from districts, signal types and congestion |
 | watchdog-service | 7024 | Alerts when intersection-service stops sending heartbeats |
 
 Each is an **independent Maven project** — no parent aggregator — in the single
@@ -29,7 +29,7 @@ record types and of `Broker`.
 
 | Stage | What was built |
 |---|---|
-| **1 — Data ingestion** | `IntersectionCleaner`: header-driven CSV parsing, normalisation, de-duplication, and a rejection reason for every row it cannot use. `GET /cleaning-report` shows exactly what it did. Issue categories are listed in [ingestion-service/README.md](ingestion-service/README.md). |
+| **1 — Data ingestion** | `IntersectionCleaner`: header-driven CSV parsing, canonical ids, districts and signal types, every boolean encoding the export uses, duplicates merged and conflicts rejected. Missing values are kept as `null` rather than defaulted. Each issue category from the brief is mapped to its handling in [ingestion-service/README.md](ingestion-service/README.md), and the brief's worked example is a test. |
 | **2 — REST integration** | intersection-service loads from ingestion-service and validates lookups; routing-service calls it to check both ends of a route, and reads the congestion level. Explicit connect and request timeouts throughout. |
 | **3 — Asynchronous messaging** | congestion-service publishes every change to `congestion-events-topic`; routing-service subscribes instead of polling. Messages carry a version so duplicates and out-of-order delivery are ignored. |
 | **4 — Watchdog** | intersection-service sends a heartbeat every 5s on `intersection-heartbeat-queue`; the watchdog declares it DOWN after three missed beats and RECOVERED when they return. |
@@ -44,14 +44,19 @@ Requires JDK 21+ and Maven 3.8+.
 .\scripts\run-all.ps1            # one window per service
 ```
 
+There is no root `pom.xml` — the brief asks for independent projects, so Maven
+runs inside a service folder (`cd ingestion-service; mvn test`) or through the
+script above, which is the PowerShell equivalent of the brief's
+`find . -name pom.xml -execdir mvn package \;`.
+
 Then:
 
 ```powershell
 irm http://localhost:7020/cleaning-report
-irm http://localhost:7021/intersections/INT-009
-irm "http://localhost:7023/route?from=INT-009&to=INT-010"
+irm http://localhost:7021/intersections/int-1005      # id matching is case-insensitive
+irm "http://localhost:7023/route?from=INT-1001&to=INT-1002"
 .\scripts\set-congestion.ps1 6 "Accident on the M1"
-irm "http://localhost:7023/route?from=INT-009&to=INT-010"   # slower now
+irm "http://localhost:7023/route?from=INT-1001&to=INT-1002"   # slower now
 irm http://localhost:7024/status
 ```
 
@@ -83,14 +88,14 @@ validate. Start it again: RECOVERED.
 
 ## Tests
 
-43 tests across the five services, all runnable without a broker or a network:
+51 tests across the five services, all runnable without a broker or a network:
 
 | Service | Covers |
 |---|---|
-| ingestion | Every data-quality category, and that no row is unaccounted for |
+| ingestion | Every data-quality category, the brief's worked example, and that no row is unaccounted for |
 | intersection | Case-insensitive lookup, district filtering, refresh semantics |
 | congestion | The 0–8 range, version increments, no-op updates |
-| routing | Distance and congestion maths; duplicate and out-of-order messages |
+| routing | Travel-time maths, warnings for missing or inactive data, duplicate and out-of-order messages |
 | watchdog | UNKNOWN at start-up, tolerance of one missed beat, one alert per outage |
 
 ## Deliberate limitations
@@ -98,9 +103,12 @@ validate. Start it again: RECOVERED.
 - State is in memory. Restarting congestion-service resets the level to 0.
 - One instance of each service. Scaling routing out would need the congestion
   level in a shared store, or a durable subscription per instance.
-- The travel-time model is straight-line distance and a congestion multiplier,
-  not a traffic simulation. It is deterministic and testable, which is what the
-  integration work needs from it.
+- The legacy export has no coordinates, so the travel-time model works from
+  district, signal type and congestion rather than distance. It is not a traffic
+  simulation; it is deterministic and testable, which is what the integration
+  work needs from it.
+- Routing warns about missing or inactive intersections rather than refusing to
+  answer. A caller needs a route more than it needs a purist error.
 - The watchdog is not itself watched.
 
 ## Tech

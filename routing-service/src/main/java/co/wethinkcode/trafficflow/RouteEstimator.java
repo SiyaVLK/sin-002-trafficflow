@@ -1,61 +1,113 @@
 package co.wethinkcode.trafficflow;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
 /**
- * Turns two intersections and a congestion level into an estimated travel time.
+ * Estimates travel time between two intersections.
  *
- * <p>The model is deliberately simple and explainable: straight-line distance,
- * an average urban speed, and a penalty that grows with the congestion level.
- * It is not a traffic simulation, and the README says so. What matters for the
- * brief is that routing combines data from two other services into an answer,
- * and that the calculation is pure and therefore testable without any network.
+ * <p>The legacy data has no coordinates, so distance is not available. What it
+ * does have is a district and a signal type, and those are enough for a model
+ * that is simple, deterministic and honest about what it is:
  *
- * <p>When an intersection has no usable coordinates — the legacy data has a few
- * — a default distance is used and the response says the distance was
- * estimated, rather than silently returning a confident wrong number.
+ * <pre>
+ *   minutes = (base + delay(from) + delay(to)) x congestion factor
+ * </pre>
+ *
+ * where the base is shorter within one district than across two, each signal
+ * type contributes its own typical delay, and the congestion factor runs from
+ * 1.0 at level 0 to 2.0 at level 8.
+ *
+ * <p>It is not a traffic simulation and the README says so. What the brief
+ * needs from it is that routing combines data from two other services into one
+ * answer, and that the calculation is pure — so it can be tested without a
+ * network, a broker, or a running system.
+ *
+ * <p>Missing data produces a <b>warning, not a guess</b>. An intersection whose
+ * signal is switched off, or whose status was never recorded, still gets an
+ * estimate, with the caveat attached. Refusing to answer would be worse: the
+ * caller needs a route, and knowing the answer is uncertain is more useful than
+ * no answer at all.
  */
 public final class RouteEstimator {
 
-    static final double AVERAGE_SPEED_KMH = 35.0;
-    static final double DEFAULT_DISTANCE_KM = 4.0;
-    static final double EARTH_RADIUS_KM = 6371.0;
+    static final double SAME_DISTRICT_BASE_MINUTES = 4.0;
+    static final double CROSS_DISTRICT_BASE_MINUTES = 9.0;
+
+    /** Typical delay contributed by passing through each kind of control. */
+    private static final Map<String, Double> SIGNAL_DELAY_MINUTES = Map.of(
+            "4-way", 0.8,
+            "stop-sign", 0.5,
+            "pedestrian", 0.4,
+            "roundabout", 0.2);
+
+    static final double UNKNOWN_SIGNAL_DELAY_MINUTES = 0.6;
 
     public record Estimate(
-            double distanceKm,
-            boolean distanceEstimated,
+            double baseMinutes,
+            double signalDelayMinutes,
             int congestionLevel,
             double congestionFactor,
-            double estimatedMinutes) {
+            double estimatedMinutes,
+            List<String> warnings) {
     }
 
     private RouteEstimator() {
     }
 
     public static Estimate estimate(Intersection from, Intersection to, int congestionLevel) {
-        boolean estimated = !from.hasCoordinates() || !to.hasCoordinates();
-        double distanceKm = estimated
-                ? DEFAULT_DISTANCE_KM
-                : haversineKm(from.lat(), from.lon(), to.lat(), to.lon());
+        List<String> warnings = new ArrayList<>();
+
+        double base = sameDistrict(from, to) ? SAME_DISTRICT_BASE_MINUTES : CROSS_DISTRICT_BASE_MINUTES;
+        if (from.district() == null || to.district() == null) {
+            warnings.add("district not recorded for one or both intersections; "
+                    + "assumed a cross-district trip");
+        }
+
+        double delay = signalDelay(from, warnings) + signalDelay(to, warnings);
+        checkActive(from, warnings);
+        checkActive(to, warnings);
 
         double factor = congestionFactor(congestionLevel);
-        double minutes = distanceKm / AVERAGE_SPEED_KMH * 60 * factor;
+        double minutes = (base + delay) * factor;
 
-        return new Estimate(round(distanceKm), estimated, congestionLevel, factor, round(minutes));
+        return new Estimate(base, round(delay), congestionLevel, factor, round(minutes), List.copyOf(warnings));
     }
 
-    /**
-     * Level 0 leaves the free-flow time alone; level 8 roughly doubles it.
-     */
+    /** Level 0 leaves the free-flow time alone; level 8 doubles it. */
     static double congestionFactor(int congestionLevel) {
         return round(1.0 + 0.125 * Math.max(0, congestionLevel));
     }
 
-    static double haversineKm(double lat1, double lon1, double lat2, double lon2) {
-        double dLat = Math.toRadians(lat2 - lat1);
-        double dLon = Math.toRadians(lon2 - lon1);
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        return EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    static boolean sameDistrict(Intersection from, Intersection to) {
+        return from.district() != null
+                && to.district() != null
+                && from.district().equalsIgnoreCase(to.district());
+    }
+
+    static double signalDelay(Intersection intersection, List<String> warnings) {
+        String type = intersection.signalType();
+        if (type == null) {
+            warnings.add("signal type not recorded for " + intersection.id()
+                    + "; used the average delay");
+            return UNKNOWN_SIGNAL_DELAY_MINUTES;
+        }
+        Double delay = SIGNAL_DELAY_MINUTES.get(type.toLowerCase());
+        if (delay == null) {
+            warnings.add("unrecognised signal type '" + type + "' at " + intersection.id()
+                    + "; used the average delay");
+            return UNKNOWN_SIGNAL_DELAY_MINUTES;
+        }
+        return delay;
+    }
+
+    private static void checkActive(Intersection intersection, List<String> warnings) {
+        if (Boolean.FALSE.equals(intersection.active())) {
+            warnings.add(intersection.id() + " is marked inactive; the estimate assumes it is passable");
+        } else if (intersection.active() == null) {
+            warnings.add("active status not recorded for " + intersection.id());
+        }
     }
 
     private static double round(double value) {

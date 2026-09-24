@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IntersectionRepositoryTest {
@@ -17,45 +18,46 @@ class IntersectionRepositoryTest {
     @BeforeEach
     void load() {
         repository.replaceAll(List.of(
-                new Intersection("INT-009", "Rivonia Rd & Katherine St", "Sandton", -26.106, 28.058),
-                new Intersection("INT-010", "Grayston Dr & Sandton Dr", "Sandton", -26.103, 28.062),
-                new Intersection("INT-014", "Commissioner St & Eloff St", "Johannesburg CBD", -26.205, 28.043)));
+                new Intersection("INT-1001", "Downtown", "4-way", true),
+                new Intersection("INT-1005", "Downtown", "roundabout", true),
+                new Intersection("INT-1002", "Midtown", "pedestrian", true),
+                new Intersection("INT-1015", null, "4-way", true)));
     }
 
     @Test
     @DisplayName("Lookup ignores case and stray whitespace in the id")
     void lookupIsForgiving() {
-        assertTrue(repository.find("int-009").isPresent());
-        assertTrue(repository.find(" INT-009 ").isPresent());
-        assertEquals("Sandton", repository.find("INT-009").orElseThrow().district());
+        assertTrue(repository.find("int-1001").isPresent());
+        assertTrue(repository.find(" INT-1001 ").isPresent());
+        assertEquals("Downtown", repository.find("INT-1001").orElseThrow().district());
     }
 
     @Test
     @DisplayName("An unknown id returns empty rather than throwing")
     void unknownIdIsEmpty() {
-        assertTrue(repository.find("INT-999").isEmpty());
+        assertTrue(repository.find("INT-9999").isEmpty());
     }
 
     @Test
     @DisplayName("Intersections can be filtered by district, case-insensitively")
     void filtersByDistrict() {
-        assertEquals(2, repository.inDistrict("sandton").size());
-        assertEquals(0, repository.inDistrict("Soweto").size());
+        assertEquals(2, repository.inDistrict("downtown").size());
+        assertEquals(0, repository.inDistrict("Eastside").size());
     }
 
     @Test
-    @DisplayName("District counts summarise the loaded data")
-    void countsDistricts() {
-        assertEquals(Map.of("Sandton", 2L, "Johannesburg CBD", 1L), repository.districtCounts());
+    @DisplayName("An intersection with no district is not counted under a made-up one")
+    void handlesMissingDistrict() {
+        assertEquals(Map.of("Downtown", 2L, "Midtown", 1L), repository.districtCounts());
+        assertNull(repository.find("INT-1015").orElseThrow().district());
     }
 
     @Test
     @DisplayName("A refresh replaces the previous data rather than adding to it")
     void refreshReplaces() {
-        repository.replaceAll(List.of(
-                new Intersection("INT-001", "Empire Rd & Jan Smuts Ave", "Parktown", -26.183, 28.030)));
+        repository.replaceAll(List.of(new Intersection("INT-2001", "Eastside", "stop-sign", false)));
 
         assertEquals(1, repository.size());
-        assertTrue(repository.find("INT-009").isEmpty());
+        assertTrue(repository.find("INT-1001").isEmpty());
     }
 }

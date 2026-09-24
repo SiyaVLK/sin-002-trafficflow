@@ -13,21 +13,24 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 /**
  * Stage 1: reads the legacy intersections export, cleans it once, and serves
  * the result over REST for every other service to consume.
  *
- * <p>Cleaning happens here and nowhere else. If each service cleaned names its
- * own way, "OXFORD RD" in one service and "Oxford Rd" in another would be two
- * different intersections, and validation would silently fail.
+ * <p>Cleaning happens here and nowhere else. If each service normalised ids its
+ * own way, {@code int-1005} in one and {@code INT-1005} in another would be two
+ * different intersections, and validation would quietly start failing.
  *
  * <pre>
- *   GET /health           "OK"
- *   GET /intersections    every cleaned intersection
- *   GET /intersections/{id}
- *   GET /districts        district to intersection count
- *   GET /cleaning-report  what was accepted, merged and rejected, with reasons
+ *   GET /health              "OK"
+ *   GET /intersections       every cleaned intersection
+ *                            ?district=Downtown  ?signal=roundabout  ?active=true
+ *   GET /intersections/{id}  one intersection, 404 when unknown
+ *   GET /districts           district to intersection count
+ *   GET /cleaning-report     what was accepted, merged and rejected, with reasons
  * </pre>
  */
 public final class IngestionServiceApp {
@@ -49,6 +52,10 @@ public final class IngestionServiceApp {
                 report.duplicatesMerged(), report.rejected().size());
         report.rejected().forEach(r ->
                 log.warn("  line {} rejected ({}): {}", r.line(), r.reason(), r.raw()));
+        log.info("  {} with no district, {} with no signal type, {} with an unknown active flag",
+                count(intersections, i -> i.district() == null),
+                count(intersections, i -> i.signalType() == null),
+                count(intersections, i -> i.active() == null));
 
         Javalin app = Javalin.create().start(PORT);
 
@@ -56,11 +63,16 @@ public final class IngestionServiceApp {
 
         app.get("/intersections", ctx -> {
             String district = ctx.queryParam("district");
-            ctx.json(district == null || district.isBlank()
-                    ? intersections
-                    : intersections.stream()
-                            .filter(i -> i.district().equalsIgnoreCase(district.strip()))
-                            .toList());
+            String signal = ctx.queryParam("signal");
+            String active = ctx.queryParam("active");
+            ctx.json(intersections.stream()
+                    .filter(i -> district == null || district.isBlank()
+                            || (i.district() != null && i.district().equalsIgnoreCase(district.strip())))
+                    .filter(i -> signal == null || signal.isBlank()
+                            || (i.signalType() != null && i.signalType().equalsIgnoreCase(signal.strip())))
+                    .filter(i -> active == null || active.isBlank()
+                            || (i.active() != null && i.active() == Boolean.parseBoolean(active.strip())))
+                    .toList());
         });
 
         app.get("/intersections/{id}", ctx -> {
@@ -73,9 +85,16 @@ public final class IngestionServiceApp {
                             () -> ctx.status(404).json(Map.of("error", "Unknown intersection: " + id)));
         });
 
-        app.get("/districts", ctx -> ctx.json(intersections.stream()
-                .collect(java.util.stream.Collectors.groupingBy(
-                        Intersection::district, java.util.TreeMap::new, java.util.stream.Collectors.counting()))));
+        // Intersections with no recorded district are counted separately rather
+        // than bucketed under a made-up name.
+        app.get("/districts", ctx -> {
+            Map<String, Long> counts = intersections.stream()
+                    .filter(i -> i.district() != null)
+                    .collect(Collectors.groupingBy(Intersection::district, TreeMap::new, Collectors.counting()));
+            ctx.json(Map.of(
+                    "districts", counts,
+                    "withoutDistrict", count(intersections, i -> i.district() == null)));
+        });
 
         app.get("/cleaning-report", ctx -> ctx.json(report));
 
@@ -83,10 +102,14 @@ public final class IngestionServiceApp {
                 PORT, intersections.size());
     }
 
+    private static long count(List<Intersection> intersections, java.util.function.Predicate<Intersection> test) {
+        return intersections.stream().filter(test).count();
+    }
+
     /**
      * Reads the data file from the first argument if given, otherwise from the
-     * classpath. The argument makes it easy to point the service at the brief's
-     * own CSV without rebuilding.
+     * classpath — handy for pointing the service at another export without
+     * rebuilding.
      */
     private static List<String> readData(String[] args) throws IOException {
         if (args.length > 0) {

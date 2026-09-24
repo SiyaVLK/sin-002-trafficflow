@@ -99,12 +99,13 @@ public final class RoutingServiceApp {
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("from", from.get());
             response.put("to", to.get());
-            response.put("distanceKm", estimate.distanceKm());
-            response.put("distanceEstimated", estimate.distanceEstimated());
+            response.put("baseMinutes", estimate.baseMinutes());
+            response.put("signalDelayMinutes", estimate.signalDelayMinutes());
             response.put("congestionLevel", reading.level());
             response.put("congestionSource", reading.source());
             response.put("congestionFactor", estimate.congestionFactor());
             response.put("estimatedMinutes", estimate.estimatedMinutes());
+            response.put("warnings", estimate.warnings());
             ctx.json(response);
         });
 

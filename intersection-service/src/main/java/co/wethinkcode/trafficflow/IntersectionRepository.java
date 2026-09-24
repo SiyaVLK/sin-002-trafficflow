@@ -38,13 +38,19 @@ public class IntersectionRepository {
     public List<Intersection> inDistrict(String district) {
         String wanted = district == null ? "" : district.strip();
         return ordered.stream()
-                .filter(i -> i.district().equalsIgnoreCase(wanted))
+                .filter(i -> i.district() != null && i.district().equalsIgnoreCase(wanted))
                 .toList();
     }
 
+    /**
+     * Counts per district. Intersections whose district the legacy export never
+     * recorded are left out rather than bucketed under an invented name — see
+     * {@code withoutDistrict} on the ingestion service for that figure.
+     */
     public Map<String, Long> districtCounts() {
-        return ordered.stream().collect(Collectors.groupingBy(
-                Intersection::district, TreeMap::new, Collectors.counting()));
+        return ordered.stream()
+                .filter(i -> i.district() != null)
+                .collect(Collectors.groupingBy(Intersection::district, TreeMap::new, Collectors.counting()));
     }
 
     public int size() {

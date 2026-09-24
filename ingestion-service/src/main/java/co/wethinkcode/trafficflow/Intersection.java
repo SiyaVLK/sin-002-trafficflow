@@ -1,16 +1,17 @@
 package co.wethinkcode.trafficflow;
 
 /**
- * A cleaned intersection record.
+ * A cleaned intersection record, matching the columns of the legacy export.
  *
- * <p>Latitude and longitude are nullable: some legacy rows have no usable
- * coordinates, and dropping an otherwise valid intersection because of a
- * missing coordinate would lose real data. Consumers that need coordinates
- * check for null rather than assuming they are present.
+ * <p>Three of the four fields are nullable on purpose. The brief's own worked
+ * example makes the rule explicit: a value the source never gave is kept as
+ * null "rather than dropped or guessed, so downstream services can see it's
+ * missing". Defaulting would be more convenient and less true.
+ *
+ * @param id         canonical upper-case id, e.g. INT-1005 — the only required field
+ * @param district   canonical district, or null when the export did not say
+ * @param signalType one of {@link SignalTypes}, or null when unrecorded
+ * @param active     true, false, or null when the flag said neither
  */
-public record Intersection(String id, String name, String district, Double lat, Double lon) {
-
-    public boolean hasCoordinates() {
-        return lat != null && lon != null;
-    }
+public record Intersection(String id, String district, String signalType, Boolean active) {
 }

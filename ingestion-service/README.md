@@ -2,61 +2,68 @@
 
 Stage 1. Reads `intersections-legacy.csv`, cleans it once, and serves the
 result over REST. Every other service treats this output as the source of truth
-for intersection names, ids and districts.
+for intersection ids, districts and signal types.
 
 ## Endpoints
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | `OK` |
-| `GET /intersections` | Every cleaned intersection (`?district=Sandton` to filter) |
-| `GET /intersections/{id}` | One intersection, 404 when unknown |
-| `GET /districts` | District to intersection count |
-| `GET /cleaning-report` | What was accepted, merged and rejected, with reasons |
+| `GET /intersections` | Every cleaned intersection. Filters: `?district=Downtown`, `?signal=roundabout`, `?active=true` |
+| `GET /intersections/{id}` | One intersection, 404 when unknown. Id matching is case-insensitive |
+| `GET /districts` | District to intersection count, plus how many have no district recorded |
+| `GET /cleaning-report` | Rows read, accepted, merged and rejected — each rejection with a line number and a reason |
 
 ## Data quality issues handled
 
-The legacy export has the problems real exports have. Each is handled
-deliberately rather than by dropping rows until the file parses.
+Each issue named in the brief, and what the cleaner does with it:
 
-| Issue | Example in the file | What the cleaner does |
+| Issue | Example in the export | Handling |
 |---|---|---|
-| Inconsistent case | `WILLIAM NICOL DR & REPUBLIC RD` | Title-cases names, upper-cases ids |
-| Stray whitespace | `  jan smuts ave & bolton rd ` | Trims and collapses internal runs of spaces |
-| Footnote markers | `Jan Smuts Ave & Empire Rd*` | Strips `*` |
-| Bracketed notes | `Witkoppen Rd & Cedar Rd (north)` | Strips the note, keeps the name |
-| Exact duplicates | `INT-002` listed twice identically | Merged, counted in `duplicatesMerged` |
-| Conflicting duplicates | `INT-004` in Randburg and in Sandton | **Rejected.** Guessing which row is right would corrupt the source of truth |
-| Placeholder values | `N/A`, `NULL`, `-`, `?`, `unknown` | Treated as empty, so they never become a district named "N/A" |
-| Missing required fields | Row with no id, name or district | Rejected with the reason |
-| Wrong column count | A row with 4 cells instead of 5 | Rejected with expected and actual counts |
-| Unparseable coordinates | `not-a-number` | Coordinate dropped, **intersection kept** |
-| Out-of-range coordinates | latitude `-99.5` | Same: dropped, not fatal |
-| Comma decimal separators | `-26,183` | Parsed as `-26.183` |
-| Blank lines and comments | `# Legacy export...` | Skipped, not counted as rows |
+| Inconsistent casing in ids | `int-1002`, `INT-1003 ` | Upper-cased and stripped, so `int-1005` and `INT-1005` are one intersection |
+| Inconsistent casing in values | `downtown`, `DOWNTOWN`, `ROUNDABOUT` | Districts title-cased, signal types mapped to a canonical value |
+| Padding | `" Downtown "`, `"Down  town"`, header `"District "` | Trimmed, internal runs of spaces collapsed — the header too, which is why `District ` still maps |
+| Duplicate records | `INT-1005` and `int-1005` | Merged into one record when the cleaned details agree; counted in `duplicatesMerged` |
+| Conflicting duplicates | same id, different district | **Rejected** with a reason. Guessing which row is right would corrupt the source of truth every other service depends on |
+| Missing / placeholder values | blank, `N/A`, `n/a`, `TBD`, `unknown`, `-`, `NaN` | All mean "no value" and become `null` — never a district literally named "N/A" |
+| Inconsistent boolean flags | `Y`, `yes`, `1`, `true`, `TRUE`, `N`, `no`, `0`, `FALSE` | Parsed to a real boolean |
+| Unrecognised flags | `unknown`, blank | `null`, meaning not known — see below |
+| Naming and spelling variants | `4-way`, `4-Way`, `four-way`, `traffic-circle` | Collapsed to one canonical value: `4-way`, `pedestrian`, `roundabout`, `stop-sign` |
+| Malformed rows | a row with 3 cells instead of 4 | Rejected, reporting both counts |
 
-Two decisions worth defending:
+The export in this repo has no date or numeric columns. If a future export adds
+them, they belong in the same place: one normaliser per column type, applied
+here rather than in each consuming service.
 
-- **A bad coordinate does not discard the intersection.** Coordinates are used
-  for distance estimates; the id, name and district are used for validation.
-  Throwing away a valid intersection because one field is broken would lose
-  more than it protects. Routing flags the affected estimate instead.
-- **Nothing disappears silently.** `rowsRead == accepted + duplicatesMerged +
-  rejected` is asserted by a test, and every rejection carries a line number
-  and a reason so the data owner can fix the source.
+### Two decisions worth defending
 
-## Using the brief's own CSV
+**Missing stays missing.** A blank signal type becomes `null`, not a default,
+and a row with no district is kept with `district: null` rather than dropped.
+The brief's worked example makes the same call: kept "rather than dropped or
+guessed, so downstream services can see it's missing". Routing then warns on
+the uncertainty instead of inheriting a fabricated value.
 
-The parser maps columns by **header name**, accepting the usual aliases
-(`intersection_id` / `id` / `code`, `description` / `name`, `region` /
-`district`, `latitude` / `lat`, `longitude` / `lon` / `lng`). A file with the
-columns in a different order, or with extra columns, works unchanged.
+**Only the id is required.** A record with no id cannot be referenced by any
+other service, so there is nothing useful to keep. Everything else can be
+missing and still leave a usable record.
 
-To point the service at a file outside the jar:
+**Nothing disappears unexplained.** `rowsRead == accepted + duplicatesMerged +
+rejected` is asserted by a test, and every rejection carries a line number and a
+reason so the data owner can fix the source.
+
+## Running
 
 ```bash
+mvn package
+java -jar target/ingestion-service.jar
+
+# or point it at another export without rebuilding:
 java -jar target/ingestion-service.jar path/to/intersections-legacy.csv
 ```
+
+Columns are matched by **header name** — `intersection_id`/`id`,
+`District`/`region`, `signal_type`/`type`, `active_flag`/`active` — so a file
+with the columns in a different order, or with extra columns, works unchanged.
 
 ## Tests
 
@@ -64,5 +71,6 @@ java -jar target/ingestion-service.jar path/to/intersections-legacy.csv
 mvn test
 ```
 
-`IntersectionCleanerTest` covers each issue category above, including that the
-shipped file is fully accounted for.
+15 tests, including the brief's own worked example as a test case: the five raw
+rows in this README's spec produce exactly the four cleaned records it
+documents.
