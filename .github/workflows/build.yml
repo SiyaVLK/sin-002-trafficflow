@@ -24,9 +24,9 @@ jobs:
           - routing-service
           - watchdog-service
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           java-version: "21"
           distribution: temurin
@@ -52,7 +52,7 @@ jobs:
           - { service: routing-service,      port: 7023 }
           - { service: watchdog-service,     port: 7024 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 

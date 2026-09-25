@@ -1,5 +1,7 @@
 # TrafficFlow
 
+[![build](https://github.com/SiyaVLK/sin-002-trafficflow/actions/workflows/build.yml/badge.svg)](https://github.com/SiyaVLK/sin-002-trafficflow/actions/workflows/build.yml)
+
 Urban traffic management as five independent Java services: legacy data is
 cleaned once, intersections are validated over REST, and the congestion level
 is broadcast over an ActiveMQ topic so routing never has to poll for it. A
